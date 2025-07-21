@@ -1,3 +1,8 @@
+# === Ignore large datasets ===
+RichECG_Datasets/features_*.pkl
+RichECG_Datasets/segments_*.npy
+ptbxl_dl_dataset_v2/datasets/*.npz
+
 # Ignore datasets and models
 *.pkl
 *.npy
