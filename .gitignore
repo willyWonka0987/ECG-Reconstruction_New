@@ -1,0 +1,34 @@
+# Ignore datasets and models
+*.pkl
+*.npy
+*.h5
+*.pt
+*.ckpt
+*.npz
+
+# Ignore output and checkpoints
+checkpoints/
+logs/
+outputs/
+results/
+
+# Ignore cache and temporary files
+__pycache__/
+*.pyc
+*.pyo
+*.tmp
+
+# Ignore notebooks checkpoints
+.ipynb_checkpoints/
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore virtual environments
+env/
+venv/
+
+# Optional: ignore large files >100MB (manually)
+# (GitHub blocks files >100MB anyway)
+
