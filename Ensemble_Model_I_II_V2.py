@@ -22,8 +22,8 @@ MODELS_DIR = OUTPUT_DIR / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 REPORT_FILE = OUTPUT_DIR / "evaluation_report.txt"
 
-INPUT_LEADS = ["I", "II", "V2"]
-TARGET_LEADS = ["V1", "V3", "V4", "V5", "V6"]
+INPUT_LEADS = ["I", "aVR", "V2"]
+TARGET_LEADS = ["II", "V1", "V3", "V4", "V5", "V6"]
 SEGMENT_LENGTH = 80
 BATCH_SIZE = 32
 EPOCHS = 300
