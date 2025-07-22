@@ -1,15 +1,16 @@
-import os
-import pickle
-from pathlib import Path
-
-import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
+import pickle
+import numpy as np
+from pathlib import Path
+from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_squared_error, r2_score
 from scipy.stats import pearsonr
+from xgboost import XGBRegressor
+from tqdm import tqdm
 import matplotlib.pyplot as plt
-from tqdm import tqdm, trange
+import os
 
 # --- Config ---
 SAVE_DIR = Path("RichECG_Datasets")
@@ -22,26 +23,14 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 REPORT_FILE = OUTPUT_DIR / "evaluation_report.txt"
 
 INPUT_LEADS = ["I", "II", "V2"]
-TARGET_LEADS = ["III"]
+TARGET_LEADS = ["V1", "V3", "V4", "V5", "V6"]
 SEGMENT_LENGTH = 80
 BATCH_SIZE = 32
-EPOCHS = 1
+EPOCHS = 300
 LEARNING_RATE = 1e-3
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-def encode_metadata(meta_dict):
-    age = meta_dict.get("age", 0)
-    sex = 1 if meta_dict.get("sex", "").lower() == "male" else 0
-    axis = meta_dict.get("heart_axis", "").lower()
-    axis_encoded = [0, 0, 0]
-    if axis == "normal":
-        axis_encoded[0] = 1
-    elif axis == "left axis deviation":
-        axis_encoded[1] = 1
-    elif axis == "right axis deviation":
-        axis_encoded[2] = 1
-    return [age, sex] + axis_encoded
-
+# --- Dataset Class ---
 class RichECGDataset(Dataset):
     def __init__(self, features_path, segments_path, target_lead):
         self.samples = []
@@ -50,44 +39,30 @@ class RichECGDataset(Dataset):
             while True:
                 try:
                     rec = pickle.load(f)
-                    seg_idx = rec.get("segment_index")
-                    if seg_idx is None or seg_idx >= segments.shape[0]:
+                    if rec.get("segment_index") is None:
                         continue
-                    all_leads = INPUT_LEADS + [target_lead]
-                    if any(lead not in rec["features"] for lead in all_leads):
+                    if not all(lead in rec["features"] for lead in INPUT_LEADS + [target_lead]):
                         continue
-                    if any(not np.all(np.isfinite(rec["features"][lead])) for lead in all_leads):
+                    seg_idx = rec["segment_index"]
+                    if seg_idx >= segments.shape[0]:
                         continue
-                    feat = np.concatenate([rec["features"][lead] for lead in INPUT_LEADS])
-                    amps, times, qrs_area, qrs_dur = [], [], [], []
+
+                    full_segment_inputs = []
                     for lead in INPUT_LEADS:
-                        wave = rec["waves"].get(lead, {})
-                        amps.extend([wave.get(f"{w}_amp", 0) or 0 for w in ['P', 'Q', 'R', 'S', 'T']])
-                        times.extend([wave.get(f"{w}time", 0) or 0 for w in ['P', 'Q', 'R', 'S', 'T']])
-                        qrs_area.append(wave.get("QRS_area", 0) or 0)
-                        qrs_dur.append(wave.get("QRS_duration", 0) or 0)
-                    intervals = []
-                    for lead in INPUT_LEADS:
-                        lead_intervals = rec["intervals"].get(lead, {})
-                        for key in ['PR', 'QT', 'ST', 'RR']:
-                            val = lead_intervals.get(key)
-                            if isinstance(val, list) and len(val) > 0:
-                                mean_val = np.mean(val)
-                                intervals.append(mean_val if np.isfinite(mean_val) else 0)
-                            else:
-                                intervals.append(0)
-                    meta_features = encode_metadata(rec["metadata"])
-                    x = np.concatenate([feat, amps, times, qrs_area, qrs_dur, intervals, meta_features])
+                        lead_index = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"].index(lead)
+                        full_segment_inputs.append(segments[seg_idx, :, lead_index])
+                    full_segment_inputs = np.concatenate(full_segment_inputs)
+
+                    features_inputs = np.concatenate([rec["features"][lead] for lead in INPUT_LEADS])
+                    x = np.concatenate([features_inputs, full_segment_inputs])
+
                     lead_index = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"].index(target_lead)
                     y = segments[seg_idx, :, lead_index]
-                    if not np.all(np.isfinite(x)) or not np.all(np.isfinite(y)):
-                        continue
-                    self.samples.append((x, y))
+                    if np.all(np.isfinite(x)) and np.all(np.isfinite(y)):
+                        self.samples.append((x, y))
                 except EOFError:
                     break
-                except Exception:
-                    continue
-        print(f"{features_path.name} ({target_lead}) - Final samples: {len(self.samples)}")
+        print(f"{features_path.name} ({target_lead}) - num of samples : {len(self.samples)}")
 
     def __len__(self):
         return len(self.samples)
@@ -96,172 +71,164 @@ class RichECGDataset(Dataset):
         x, y = self.samples[idx]
         return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
 
+# --- MLP Model ---
 class MLP(nn.Module):
-    def __init__(self, input_dim):
+    def __init__(self, input_dim, output_dim):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(input_dim, 512), nn.LayerNorm(512), nn.LeakyReLU(0.1), nn.Dropout(0.3),
-            nn.Linear(512, 256), nn.LayerNorm(256), nn.LeakyReLU(0.1), nn.Dropout(0.3),
-            nn.Linear(256, 128), nn.LayerNorm(128), nn.LeakyReLU(0.1), nn.Dropout(0.2),
-            nn.Linear(128, 64), nn.LeakyReLU(0.1),
-            nn.Linear(64, 1)
+            nn.Linear(input_dim, 512),
+            nn.LayerNorm(512),
+            nn.LeakyReLU(0.1),
+            nn.Dropout(0.3),
+
+            nn.Linear(512, 256),
+            nn.LayerNorm(256),
+            nn.LeakyReLU(0.1),
+            nn.Dropout(0.3),
+
+            nn.Linear(256, 128),
+            nn.LayerNorm(128),
+            nn.LeakyReLU(0.1),
+            nn.Dropout(0.2),
+
+            nn.Linear(128, 64),
+            nn.LeakyReLU(0.1),
+
+            nn.Linear(64, output_dim)
         )
 
     def forward(self, x):
         return self.net(x)
 
-def prepare_ar_datasets(X, Y, point_idx):
-    """Prepare autoregressive input for each timepoint during training/testing."""
-    n = X.shape[0]
-    feat_dim = X.shape[1]
-    X_ar = np.zeros((n, feat_dim + 2 * point_idx))
-    if point_idx == 0:
-        X_ar[:, :feat_dim] = X
-        return X_ar
-    X_ar[:, :feat_dim] = X
-    for k in range(point_idx):
-        X_ar[:, feat_dim + 2 * k] = k
-        X_ar[:, feat_dim + 2 * k + 1] = Y[:, k]
-    return X_ar.astype(np.float32)
-
-def predict_ar(model_list, X, Y_initial=None, inference=False):
-    """Sequential autoregressive prediction, with/without Teacher Forcing."""
-    n, feat_dim = X.shape
-    outputs = np.zeros((n, SEGMENT_LENGTH))
-    for t in range(SEGMENT_LENGTH):
-        x_ar = np.zeros((n, feat_dim + 2 * t))
-        x_ar[:, :feat_dim] = X
-        if t > 0:
-            if inference:
-                for k in range(t):
-                    x_ar[:, feat_dim + 2 * k] = k
-                    x_ar[:, feat_dim + 2 * k + 1] = outputs[:, k]
-            else:
-                for k in range(t):
-                    x_ar[:, feat_dim + 2 * k] = k
-                    x_ar[:, feat_dim + 2 * k + 1] = Y_initial[:, k] if Y_initial is not None else 0
-        mdl = model_list[t]
-        mdl.eval()
-        with torch.no_grad():
-            x_ar = x_ar.astype(np.float32)
-            pred = mdl(torch.tensor(x_ar, dtype=torch.float32).to(DEVICE)).cpu().numpy().flatten()
-        outputs[:, t] = pred
-    return outputs
-
-# --- Training & Evaluation Loop ---
+# Training + Evaluation per lead 
 with open(REPORT_FILE, "w") as report:
     for lead in TARGET_LEADS:
-        print(f"\n[Teacher Forcing] Sequential/AR model training for lead: {lead}...")
-
-        def get_numpy(ds):
-            x, y = [], []
-            for xb, yb in ds:
-                x.append(xb.numpy())
-                y.append(yb.numpy())
-            return np.stack(x), np.stack(y)
-
+        print(f"\n🔧 Training Stacking model for lead: {lead}...")
         train_ds = RichECGDataset(SAVE_DIR / "features_train.pkl", SAVE_DIR / "segments_train.npy", lead)
         val_ds = RichECGDataset(SAVE_DIR / "features_val.pkl", SAVE_DIR / "segments_val.npy", lead)
         test_ds = RichECGDataset(SAVE_DIR / "features_test.pkl", SAVE_DIR / "segments_test.npy", lead)
-        X_train, Y_train = get_numpy(train_ds)
-        X_val, Y_val = get_numpy(val_ds)
-        X_test, Y_test = get_numpy(test_ds)
 
-        model_list = []
-        best_val_losses = []
-        for point_idx in tqdm(range(SEGMENT_LENGTH), desc="Train per-point models (TF)", colour='green'):
-            Xtr = prepare_ar_datasets(X_train, Y_train, point_idx)
-            Xvl = prepare_ar_datasets(X_val, Y_val, point_idx)
-            ytr = Y_train[:, point_idx].reshape(-1, 1).astype(np.float32)
-            yvl = Y_val[:, point_idx].reshape(-1, 1).astype(np.float32)
+        train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
+        val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
 
-            mlp = MLP(Xtr.shape[1]).to(DEVICE)
-            optimizer = torch.optim.Adam(mlp.parameters(), lr=LEARNING_RATE)
-            loss_fn = nn.MSELoss()
+        input_dim = len(train_ds[0][0])
+        output_dim = SEGMENT_LENGTH
 
-            train_loader = DataLoader(list(zip(Xtr, ytr)), batch_size=BATCH_SIZE, shuffle=True)
-            best_val_loss = float("inf")
-            tr_patience = 30
-            no_improve = 0
-            for epoch in trange(EPOCHS, desc=f"Epochs for point {point_idx}", leave=False, colour='blue'):
-                mlp.train()
-                train_loss = []
-                for xb, yb in train_loader:
-                    xb = xb.float().to(DEVICE)
-                    yb = yb.float().to(DEVICE)
-                    optimizer.zero_grad()
-                    out = mlp(xb)
-                    loss = loss_fn(out, yb)
-                    loss.backward()
-                    optimizer.step()
-                    train_loss.append(loss.item() * xb.size(0))
-                mean_train_loss = np.sum(train_loss) / len(train_loader.dataset)
+        mlp = MLP(input_dim, output_dim).to(DEVICE)
+        loss_fn = nn.MSELoss()
+        optimizer = torch.optim.Adam(mlp.parameters(), lr=LEARNING_RATE)
 
-                mlp.eval()
-                with torch.no_grad():
-                    pred_val = mlp(torch.tensor(Xvl, dtype=torch.float32).to(DEVICE)).cpu().numpy().flatten()
-                val_loss = np.mean((pred_val - yvl.flatten()) ** 2)
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    torch.save(mlp.state_dict(), MODELS_DIR / f"tf_model_point_{point_idx}_{lead}.pt")
-                    no_improve = 0
-                else:
-                    no_improve += 1
-                    if no_improve > tr_patience:
-                        break
-            model_list.append(mlp)
-            best_val_losses.append(best_val_loss)
+        # Early stopping variables
+        best_val_loss = float("inf")
+        patience = 15
+        counter = 0
+        best_model_state = None
 
-        # Reload best weights per timestep
-        for t, mdl in enumerate(model_list):
-            mdl.load_state_dict(torch.load(MODELS_DIR / f"tf_model_point_{t}_{lead}.pt"))
+        for epoch in range(EPOCHS):
+            mlp.train()
+            total_loss = 0.0
+            for xb, yb in tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} - Lead {lead}", leave=False):
+                xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+                pred = mlp(xb)
+                loss = loss_fn(pred, yb)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item() * xb.size(0)
+            avg_train_loss = total_loss / len(train_ds)
 
-        # AR prediction/inference
-        y_pred_test = predict_ar(model_list, X_test, inference=True)
-        y_pred_val = predict_ar(model_list, X_val, Y_val, inference=False)
+            # Validation loss
+            mlp.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for xb, yb in val_loader:
+                    xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+                    pred = mlp(xb)
+                    loss = loss_fn(pred, yb)
+                    val_loss += loss.item() * xb.size(0)
+            avg_val_loss = val_loss / len(val_ds)
 
-        # --- Evaluation ---
-        rmse = np.sqrt(mean_squared_error(Y_test, y_pred_test))
-        r2 = r2_score(Y_test, y_pred_test)
+            print(f"Epoch {epoch+1} - Train Loss: {avg_train_loss:.4f} - Val Loss: {avg_val_loss:.4f}")
+
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                best_model_state = mlp.state_dict()
+                counter = 0
+            else:
+                counter += 1
+                if counter >= patience:
+                    print(f"⏹️ Early stopping at epoch {epoch+1}")
+                    break
+
+        # Load best model
+        if best_model_state is not None:
+            mlp.load_state_dict(best_model_state)
+
+        torch.save(mlp.state_dict(), MODELS_DIR / f"mlp_model_{lead}.pt")
+
+        def collect_predictions(dataset):
+            xs, ys, mlp_out = [], [], []
+            mlp.eval()
+            X_xgb, Y_xgb = [], []
+            with torch.no_grad():
+                for xb, yb in DataLoader(dataset, batch_size=BATCH_SIZE):
+                    xs.append(xb.numpy())
+                    ys.append(yb.numpy())
+                    xb_gpu = xb.to(DEVICE)
+                    mlp_preds = mlp(xb_gpu).cpu().numpy()
+                    mlp_out.append(mlp_preds)
+                    X_xgb.extend(xb.numpy())
+                    Y_xgb.extend(yb.numpy())
+            xgb_model = XGBRegressor(n_estimators=100, max_depth=4, verbosity=0)
+            xgb_model.fit(np.array(X_xgb), np.array(Y_xgb))
+            xgb_preds = xgb_model.predict(np.array(X_xgb))
+            meta_X = np.hstack([np.vstack(mlp_out), xgb_preds])
+            meta_y = np.vstack(ys)
+            return meta_X, meta_y, xgb_model
+
+        meta_X_train, meta_y_train, xgb_model = collect_predictions(train_ds)
+        meta_X_test, meta_y_test, _ = collect_predictions(test_ds)
+
+        meta_model = Ridge(alpha=1.0)
+        meta_model.fit(meta_X_train, meta_y_train)
+        meta_pred = meta_model.predict(meta_X_test)
+
+        with open(MODELS_DIR / f"ridge_model_{lead}.pkl", "wb") as f:
+            pickle.dump(meta_model, f)
+        with open(MODELS_DIR / f"xgb_model_{lead}.pkl", "wb") as f:
+            pickle.dump(xgb_model, f)
+
+        rmse = np.sqrt(mean_squared_error(meta_y_test, meta_pred))
+        r2 = r2_score(meta_y_test, meta_pred)
         pearson_corr = np.mean([
-            pearsonr(Y_test[:, i], y_pred_test[:, i])[0]
-            for i in range(SEGMENT_LENGTH) if np.std(Y_test[:, i]) > 0
+            pearsonr(meta_y_test[:, i], meta_pred[:, i])[0]
+            for i in range(SEGMENT_LENGTH)
+            if np.std(meta_y_test[:, i]) > 0
         ])
-        report.write(f"\nEvaluation for Lead {lead} (Teacher Forcing AR):\n")
-        report.write(f"RMSE: {rmse:.4f}\nR^2: {r2:.4f}\nPearson Correlation: {pearson_corr:.4f}\n")
 
-        # Metrics per timepoint
-        per_point_metrics = []
-        for t in range(SEGMENT_LENGTH):
-            rmse_t = np.sqrt(np.mean((Y_test[:, t] - y_pred_test[:, t]) ** 2))
-            r2_t = r2_score(Y_test[:, t], y_pred_test[:, t])
-            p_t = pearsonr(Y_test[:, t], y_pred_test[:, t])[0] if np.std(Y_test[:, t]) > 0 else 0
-            per_point_metrics.append([t, rmse_t, r2_t, p_t])
-        np.savetxt(
-            str(OUTPUT_DIR / f"per_point_metrics_{lead}.csv"),
-            per_point_metrics, delimiter=',',
-            header="point,RMSE,R2,Pearson", comments=''
-        )
+        report.write(f"\nEvaluation for Lead {lead}:\n")
+        report.write(f"RMSE: {rmse:.4f}\n")
+        report.write(f"R^2: {r2:.4f}\n")
+        report.write(f"Pearson Correlation: {pearson_corr:.4f}\n")
 
-# --- Visualization: First 10 Prediction Comparisons ---
-NUM_SAMPLES_TO_PLOT = 10
-for lead in TARGET_LEADS:
-    print(f"Generating side-by-side plots for {lead} (TF-AR)...")
-    fig, axes = plt.subplots(2, 5, figsize=(18, 6))
-    fig.suptitle(
-        f"Lead {lead}: First {NUM_SAMPLES_TO_PLOT} Test Predictions [Teacher Forcing AR]", fontsize=14
-    )
-    for i in range(NUM_SAMPLES_TO_PLOT):
-        gt = Y_test[i]
-        pred = y_pred_test[i]
-        ax = axes[i // 5, i % 5]
-        ax.plot(gt, label="Actual", color="blue")
-        ax.plot(pred, label="Predicted", color="orange", linestyle="--")
-        ax.set_title(f"Sample {i+1}", fontsize=10)
-        ax.set_xlim(0, SEGMENT_LENGTH)
-        ax.grid(True)
-        if i == 0:
-            ax.legend(loc="upper right", fontsize=8)
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    plt.savefig(PLOTS_DIR / f"{lead}_comparison_first_{NUM_SAMPLES_TO_PLOT}_tfar.png")
-    plt.close()
+        xs, ys = [], []
+        for i in range(10):
+            x, y = train_ds[i]
+            xs.append(x.unsqueeze(0))
+            ys.append(y.numpy())
+        xs_tensor = torch.cat(xs).to(DEVICE)
+        with torch.no_grad():
+            mlp_out = mlp(xs_tensor).cpu().numpy()
+            xgb_out = xgb_model.predict(xs_tensor.cpu().numpy())
+            meta_input = np.hstack([mlp_out, xgb_out])
+            preds = meta_model.predict(meta_input)
+
+        for i in range(10):
+            plt.figure(figsize=(8, 4))
+            plt.plot(ys[i], label="True", linewidth=2)
+            plt.plot(preds[i], label="Predicted", linestyle="--")
+            plt.title(f"Lead {lead} - Sample {i}")
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(PLOTS_DIR / f"{lead}_sample_{i}.png")
+            plt.close()

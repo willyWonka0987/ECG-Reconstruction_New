@@ -1,0 +1,25 @@
+
+Evaluation for Lead V1:
+RMSE: 0.0214
+R^2: 0.9344
+Pearson Correlation: 0.9667
+
+Evaluation for Lead V3:
+RMSE: 0.0382
+R^2: 0.9330
+Pearson Correlation: 0.9664
+
+Evaluation for Lead V4:
+RMSE: 0.0415
+R^2: 0.9244
+Pearson Correlation: 0.9617
+
+Evaluation for Lead V5:
+RMSE: 0.0324
+R^2: 0.9312
+Pearson Correlation: 0.9653
+
+Evaluation for Lead V6:
+RMSE: 0.0236
+R^2: 0.9329
+Pearson Correlation: 0.9661

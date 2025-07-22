@@ -19,7 +19,7 @@ Q_win = (-7, -2)
 S_win = (2, 6)
 T_win = (15, 55)
 
-for idx in range(min(100, len(ecg_data))):
+for idx in range(min(20, len(ecg_data))):
     ecg_12lead = ecg_data[idx]
     plt.figure(figsize=(22, 36))
 
