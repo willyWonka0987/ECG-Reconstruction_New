@@ -38,7 +38,7 @@ report_lines = []
 
 # ⬇️ This helper function checks for outlier amplitudes
 
-def has_outlier_peaks(peaks_dict, segment, threshold=5.0):
+def has_outlier_peaks(peaks_dict, segment, threshold=4.0):
     all_peaks = []
     for lead_idx, lead in enumerate(LEAD_NAMES):
         for wave in ['P', 'Q', 'R', 'S', 'T']:
@@ -55,17 +55,6 @@ def has_outlier_peaks(peaks_dict, segment, threshold=5.0):
         return True  # degenerate case
     z_scores = np.abs((all_peaks - mean) / std)
     return np.any(z_scores > threshold)
-
-# ⬇️ Inside `process_record` function, just before saving segment:
-# Add this line:
-#     if has_outlier_peaks(segment_peaks, segment): continue
-# You can insert that line in the same location where you skip segment if any peak is None
-#     if any(segment_peaks[...]): continue
-
-# ✨ All other parts of your code remain 100% unchanged.
-# ✅ The modified script will skip any ECG segment if *any peak* in any lead has amplitude > 5 std from global mean.
-
-
 
 
 def plot_segment(segment, segment_peaks, record_id, segment_idx):
