@@ -21,9 +21,11 @@ PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 MODELS_DIR = OUTPUT_DIR / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 REPORT_FILE = OUTPUT_DIR / "evaluation_report.txt"
+RMSE_PLOTS_DIR = PLOTS_DIR / "rmse_per_point"
+RMSE_PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
-INPUT_LEADS = ["I", "aVR", "V2"]
-TARGET_LEADS = ["II", "V1", "V3", "V4", "V5", "V6"]
+INPUT_LEADS = ["II", "V2", "V6"]
+TARGET_LEADS = ["I", "V1", "V3", "V4", "V5"]
 SEGMENT_LENGTH = 80
 BATCH_SIZE = 32
 EPOCHS = 300
@@ -100,7 +102,7 @@ class MLP(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-# Training + Evaluation per lead 
+# --- Training Loop ---
 with open(REPORT_FILE, "w") as report:
     for lead in TARGET_LEADS:
         print(f"\n🔧 Training Stacking model for lead: {lead}...")
@@ -118,7 +120,6 @@ with open(REPORT_FILE, "w") as report:
         loss_fn = nn.MSELoss()
         optimizer = torch.optim.Adam(mlp.parameters(), lr=LEARNING_RATE)
 
-        # Early stopping variables
         best_val_loss = float("inf")
         patience = 15
         counter = 0
@@ -137,7 +138,6 @@ with open(REPORT_FILE, "w") as report:
                 total_loss += loss.item() * xb.size(0)
             avg_train_loss = total_loss / len(train_ds)
 
-            # Validation loss
             mlp.eval()
             val_loss = 0.0
             with torch.no_grad():
@@ -149,7 +149,6 @@ with open(REPORT_FILE, "w") as report:
             avg_val_loss = val_loss / len(val_ds)
 
             print(f"Epoch {epoch+1} - Train Loss: {avg_train_loss:.4f} - Val Loss: {avg_val_loss:.4f}")
-
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 best_model_state = mlp.state_dict()
@@ -157,10 +156,9 @@ with open(REPORT_FILE, "w") as report:
             else:
                 counter += 1
                 if counter >= patience:
-                    print(f"⏹️ Early stopping at epoch {epoch+1}")
+                    print(f"Early stopping at epoch {epoch+1}")
                     break
 
-        # Load best model
         if best_model_state is not None:
             mlp.load_state_dict(best_model_state)
 
@@ -206,11 +204,27 @@ with open(REPORT_FILE, "w") as report:
             if np.std(meta_y_test[:, i]) > 0
         ])
 
+        # RMSE per point
+        rmse_per_point = np.sqrt(np.mean((meta_y_test - meta_pred) ** 2, axis=0)).tolist()
         report.write(f"\nEvaluation for Lead {lead}:\n")
         report.write(f"RMSE: {rmse:.4f}\n")
         report.write(f"R^2: {r2:.4f}\n")
         report.write(f"Pearson Correlation: {pearson_corr:.4f}\n")
+        report.write(f"RMSE per point (length {SEGMENT_LENGTH}):\n")
+        report.write(", ".join(f"{v:.6f}" for v in rmse_per_point) + "\n")
 
+        # Plot RMSE per point
+        plt.figure(figsize=(10, 4))
+        plt.plot(rmse_per_point, marker='o')
+        plt.title(f"RMSE per point - Lead {lead}")
+        plt.xlabel("Point index")
+        plt.ylabel("RMSE")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(RMSE_PLOTS_DIR / f"rmse_per_point_{lead}.png")
+        plt.close()
+
+        # Sample predictions plot
         xs, ys = [], []
         for i in range(10):
             x, y = train_ds[i]
