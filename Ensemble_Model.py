@@ -34,6 +34,12 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # --- Dataset Class ---
 class RichECGDataset(Dataset):
+    IMPORTANT_FEATURES = [
+        217, 216, 293, 295, 136, 294, 214, 215, 135, 132,
+        137, 296, 213, 134, 133, 292, 218, 212, 138, 211,
+        219, 131, 297, 290, 224, 220, 139, 210, 140, 130
+    ]  # قائمة الميزات المهمة حسب XGBoost
+
     def __init__(self, features_path, segments_path, target_lead):
         self.samples = []
         segments = np.load(segments_path)[:, :SEGMENT_LENGTH, :]
@@ -49,25 +55,47 @@ class RichECGDataset(Dataset):
                     if seg_idx >= segments.shape[0]:
                         continue
 
+                    # --- المقطع الكامل من كل ليد ---
                     full_segment_inputs = []
                     for lead in INPUT_LEADS:
-                        lead_index = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"].index(lead)
+                        lead_index = [
+                            "I", "II", "III", "aVR", "aVL", "aVF",
+                            "V1", "V2", "V3", "V4", "V5", "V6"
+                        ].index(lead)
                         full_segment_inputs.append(segments[seg_idx, :, lead_index])
-                    full_segment_inputs = np.stack(full_segment_inputs, axis=0)  # Shape (3, SEGMENT_LENGTH)
+                    full_segment_inputs = np.concatenate(full_segment_inputs)
 
-                    features_inputs = np.concatenate([rec["features"][lead] for lead in INPUT_LEADS])
-                    # Note: We do NOT concatenate features and segment in x. Instead, keep both separately:
-                    x = {
-                        "features": features_inputs.astype(np.float32),
-                        "segments": full_segment_inputs.astype(np.float32)
-                    }
+                    # --- استخراج الميزات المهمة فقط ---
+                    if not all(len(rec["features"][lead]) > max(self.IMPORTANT_FEATURES) for lead in INPUT_LEADS):
+                        continue
+                    advanced_features_inputs = np.concatenate([
+                        np.array(rec["features"][lead])[self.IMPORTANT_FEATURES]
+                        for lead in INPUT_LEADS
+                    ])
 
-                    lead_index = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"].index(target_lead)
+
+
+                    # --- الميتاداتا ---
+                    metadata = rec.get("metadata", {})
+                    if isinstance(metadata, dict):
+                        meta_values = np.array(list(metadata.values()), dtype=np.float32)
+                    else:
+                        meta_values = np.zeros(1, dtype=np.float32)
+
+                    # --- دمج كل المكونات ---
+                    x = np.concatenate([advanced_features_inputs, full_segment_inputs, meta_values])
+
+                    lead_index = [
+                        "I", "II", "III", "aVR", "aVL", "aVF",
+                        "V1", "V2", "V3", "V4", "V5", "V6"
+                    ].index(target_lead)
                     y = segments[seg_idx, :, lead_index]
-                    if np.all(np.isfinite(features_inputs)) and np.all(np.isfinite(full_segment_inputs)) and np.all(np.isfinite(y)):
+
+                    if np.all(np.isfinite(x)) and np.all(np.isfinite(y)):
                         self.samples.append((x, y))
                 except EOFError:
                     break
+
         print(f"{features_path.name} ({target_lead}) - num of samples : {len(self.samples)}")
 
     def __len__(self):
@@ -75,79 +103,38 @@ class RichECGDataset(Dataset):
 
     def __getitem__(self, idx):
         x, y = self.samples[idx]
-        features = torch.tensor(x["features"], dtype=torch.float32)
-        segments = torch.tensor(x["segments"], dtype=torch.float32)
-        target = torch.tensor(y, dtype=torch.float32)
-        return {"features": features, "segments": segments}, target
+        return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
 
-# --- MLP Branch ---
-class FeatureMLP(nn.Module):
-    def __init__(self, input_dim, emb_dim=128):
+
+
+# --- MLP Model ---
+class MLP(nn.Module):
+    def __init__(self, input_dim, output_dim):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, 512),
             nn.LayerNorm(512),
             nn.LeakyReLU(0.1),
             nn.Dropout(0.3),
+
             nn.Linear(512, 256),
             nn.LayerNorm(256),
             nn.LeakyReLU(0.1),
             nn.Dropout(0.3),
+
             nn.Linear(256, 128),
             nn.LayerNorm(128),
             nn.LeakyReLU(0.1),
             nn.Dropout(0.2),
-            nn.Linear(128, emb_dim),
-            nn.LeakyReLU(0.1)
+
+            nn.Linear(128, 64),
+            nn.LeakyReLU(0.1),
+
+            nn.Linear(64, output_dim)
         )
 
     def forward(self, x):
         return self.net(x)
-
-# --- CNN Branch ---
-class SegmentCNN(nn.Module):
-    def __init__(self, in_channels, emb_dim=128):
-        super().__init__()
-        self.cnn = nn.Sequential(
-            nn.Conv1d(in_channels, 64, kernel_size=5, padding=2),
-            nn.BatchNorm1d(64),
-            nn.LeakyReLU(0.1),
-            nn.Conv1d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
-            nn.LeakyReLU(0.1),
-            nn.AdaptiveAvgPool1d(8),  # Out: (batch, 128, 8)
-            nn.Flatten(),             # Out: (batch, 128*8)
-            nn.Linear(128*8, emb_dim),
-            nn.LeakyReLU(0.1)
-        )
-
-    def forward(self, x):
-        # x shape: (batch, channels=3, length=SEGMENT_LENGTH)
-        return self.cnn(x)
-
-# --- Fusion Model ---
-class FusionModel(nn.Module):
-    def __init__(self, feature_input_dim, segment_channels, segment_length, output_dim):
-        super().__init__()
-        emb_dim = 128  # Embedding size for each branch
-        self.feature_branch = FeatureMLP(feature_input_dim, emb_dim=emb_dim)
-        self.segment_branch = SegmentCNN(segment_channels, emb_dim=emb_dim)
-        self.classifier = nn.Sequential(
-            nn.Linear(2 * emb_dim, 128),
-            nn.LeakyReLU(0.1),
-            nn.Dropout(0.2),
-            nn.Linear(128, output_dim)
-        )
-
-    def forward(self, X):
-        features = X["features"]
-        segments = X["segments"]
-        # segments: (batch, 3, SEGMENT_LENGTH)
-        feature_emb = self.feature_branch(features)
-        segment_emb = self.segment_branch(segments)
-        concat = torch.cat([feature_emb, segment_emb], dim=1)
-        out = self.classifier(concat)
-        return out
 
 # --- Training Loop ---
 with open(REPORT_FILE, "w") as report:
@@ -160,14 +147,12 @@ with open(REPORT_FILE, "w") as report:
         train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
         val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
 
-        feature_dim = train_ds[0][0]["features"].shape[0]
-        segment_channels = train_ds[0][0]["segments"].shape[0]
-        segment_length = train_ds[0][0]["segments"].shape[1]
+        input_dim = len(train_ds[0][0])
         output_dim = SEGMENT_LENGTH
 
-        model = FusionModel(feature_dim, segment_channels, segment_length, output_dim).to(DEVICE)
+        mlp = MLP(input_dim, output_dim).to(DEVICE)
         loss_fn = nn.MSELoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+        optimizer = torch.optim.Adam(mlp.parameters(), lr=LEARNING_RATE)
 
         best_val_loss = float("inf")
         patience = 15
@@ -175,34 +160,32 @@ with open(REPORT_FILE, "w") as report:
         best_model_state = None
 
         for epoch in range(EPOCHS):
-            model.train()
+            mlp.train()
             total_loss = 0.0
-            for batch_X, batch_y in tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} - Lead {lead}", leave=False):
-                batch_X = {k:v.to(DEVICE) for k, v in batch_X.items()}
-                batch_y = batch_y.to(DEVICE)
-                pred = model(batch_X)
-                loss = loss_fn(pred, batch_y)
+            for xb, yb in tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} - Lead {lead}", leave=False):
+                xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+                pred = mlp(xb)
+                loss = loss_fn(pred, yb)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-                total_loss += loss.item() * batch_y.size(0)
+                total_loss += loss.item() * xb.size(0)
             avg_train_loss = total_loss / len(train_ds)
 
-            model.eval()
+            mlp.eval()
             val_loss = 0.0
             with torch.no_grad():
-                for batch_X, batch_y in val_loader:
-                    batch_X = {k:v.to(DEVICE) for k, v in batch_X.items()}
-                    batch_y = batch_y.to(DEVICE)
-                    pred = model(batch_X)
-                    loss = loss_fn(pred, batch_y)
-                    val_loss += loss.item() * batch_y.size(0)
+                for xb, yb in val_loader:
+                    xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+                    pred = mlp(xb)
+                    loss = loss_fn(pred, yb)
+                    val_loss += loss.item() * xb.size(0)
             avg_val_loss = val_loss / len(val_ds)
 
             print(f"Epoch {epoch+1} - Train Loss: {avg_train_loss:.4f} - Val Loss: {avg_val_loss:.4f}")
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
-                best_model_state = model.state_dict()
+                best_model_state = mlp.state_dict()
                 counter = 0
             else:
                 counter += 1
@@ -211,31 +194,27 @@ with open(REPORT_FILE, "w") as report:
                     break
 
         if best_model_state is not None:
-            model.load_state_dict(best_model_state)
+            mlp.load_state_dict(best_model_state)
 
-        torch.save(model.state_dict(), MODELS_DIR / f"fusion_model_{lead}.pt")
+        torch.save(mlp.state_dict(), MODELS_DIR / f"mlp_model_{lead}.pt")
 
         def collect_predictions(dataset):
-            Xs, ys, model_out = [], [], []
-            model.eval()
+            xs, ys, mlp_out = [], [], []
+            mlp.eval()
             X_xgb, Y_xgb = [], []
             with torch.no_grad():
-                for batch_X, batch_y in DataLoader(dataset, batch_size=BATCH_SIZE):
-                    # For xgboost, flatten features + segments for compatibility
-                    feats = batch_X["features"].numpy()
-                    segs = batch_X["segments"].numpy().reshape(len(feats), -1)
-                    feats_and_segs = np.concatenate([feats, segs], axis=1)
-                    Xs.append(batch_X)
-                    ys.append(batch_y.numpy())
-                    batch_X_cuda = {k: v.to(DEVICE) for k, v in batch_X.items()}
-                    model_preds = model(batch_X_cuda).cpu().numpy()
-                    model_out.append(model_preds)
-                    X_xgb.extend(feats_and_segs)
-                    Y_xgb.extend(batch_y.numpy())
+                for xb, yb in DataLoader(dataset, batch_size=BATCH_SIZE):
+                    xs.append(xb.numpy())
+                    ys.append(yb.numpy())
+                    xb_gpu = xb.to(DEVICE)
+                    mlp_preds = mlp(xb_gpu).cpu().numpy()
+                    mlp_out.append(mlp_preds)
+                    X_xgb.extend(xb.numpy())
+                    Y_xgb.extend(yb.numpy())
             xgb_model = XGBRegressor(n_estimators=100, max_depth=4, verbosity=0)
             xgb_model.fit(np.array(X_xgb), np.array(Y_xgb))
             xgb_preds = xgb_model.predict(np.array(X_xgb))
-            meta_X = np.hstack([np.vstack(model_out), xgb_preds])
+            meta_X = np.hstack([np.vstack(mlp_out), xgb_preds])
             meta_y = np.vstack(ys)
             return meta_X, meta_y, xgb_model
 
@@ -280,26 +259,18 @@ with open(REPORT_FILE, "w") as report:
         plt.close()
 
         # Sample predictions plot
-        Xs, ys = [], []
+        xs, ys = [], []
         for i in range(10):
             x, y = train_ds[i]
-            Xs.append({k: v.unsqueeze(0) for k, v in x.items()})
+            xs.append(x.unsqueeze(0))
             ys.append(y.numpy())
-        feat_X = {
-            "features": torch.cat([d["features"] for d in Xs], dim=0),
-            "segments": torch.cat([d["segments"] for d in Xs], dim=0)
-        }
-        for k in feat_X:
-            feat_X[k] = feat_X[k].to(DEVICE)
+        xs_tensor = torch.cat(xs).to(DEVICE)
         with torch.no_grad():
-            model_out = model(feat_X).cpu().numpy()
-            # For XGB input compatibility as above
-            feats = feat_X["features"].cpu().numpy()
-            segs = feat_X["segments"].cpu().numpy().reshape(len(feats), -1)
-            feats_and_segs = np.concatenate([feats, segs], axis=1)
-            xgb_out = xgb_model.predict(feats_and_segs)
-            meta_input = np.hstack([model_out, xgb_out])
+            mlp_out = mlp(xs_tensor).cpu().numpy()
+            xgb_out = xgb_model.predict(xs_tensor.cpu().numpy())
+            meta_input = np.hstack([mlp_out, xgb_out])
             preds = meta_model.predict(meta_input)
+
         for i in range(10):
             plt.figure(figsize=(8, 4))
             plt.plot(ys[i], label="True", linewidth=2)

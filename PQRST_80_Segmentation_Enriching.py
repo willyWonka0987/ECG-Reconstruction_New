@@ -1,5 +1,3 @@
-# [UPDATED SCRIPT: PQRST segmentation + features + robust analysis]
-
 import os
 import numpy as np
 import pandas as pd
@@ -14,6 +12,7 @@ import multiprocessing as mp
 import matplotlib.pyplot as plt
 import seaborn as sns
 import warnings
+from scipy.signal import find_peaks
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 warnings.filterwarnings("ignore", category=UserWarning, module="neurokit2")
@@ -36,6 +35,27 @@ PEAK_COLORS = {"P": "blue", "Q": "orange", "R": "red", "S": "green", "T": "purpl
 
 report_lines = []
 
+# ⬇️ This helper function checks for outlier amplitudes
+
+def has_outlier_peaks(peaks_dict, segment, threshold=4.0):
+    all_peaks = []
+    for lead_idx, lead in enumerate(LEAD_NAMES):
+        for wave in ['P', 'Q', 'R', 'S', 'T']:
+            peak_idx = peaks_dict[lead][wave]
+            if peak_idx is not None and 0 <= peak_idx < SEGMENT_LENGTH:
+                amp = segment[int(peak_idx), lead_idx]
+                all_peaks.append(amp)
+    if len(all_peaks) < 2:
+        return True  # not enough peaks to compute stats
+    all_peaks = np.array(all_peaks)
+    mean = np.mean(all_peaks)
+    std = np.std(all_peaks)
+    if std == 0:
+        return True  # degenerate case
+    z_scores = np.abs((all_peaks - mean) / std)
+    return np.any(z_scores > threshold)
+
+
 def plot_segment(segment, segment_peaks, record_id, segment_idx):
     plt.figure(figsize=(12, 10))
     for i, lead in enumerate(LEAD_NAMES):
@@ -55,14 +75,14 @@ def plot_segment(segment, segment_peaks, record_id, segment_idx):
     plt.savefig(img_path)
     plt.close()
 
-def extract_features(signal):
+def extract_features(signal, peak_indices=None, metadata=None, meta_keys=None):
     signal = np.asarray(signal).astype(np.float32)
+    features = []
 
-    # حماية من الإشارات القصيرة أو الفارغة
     if len(signal) < 2 or np.any(~np.isfinite(signal)):
-        return [0.0] * 17  # عدد الميزات الكلي المتوقع
+        return [0.0] * 34  # عدّل حسب عدد الميزات النهائي/ميزاتك
 
-    # الميزات الإحصائية
+    # الميزات الإحصائية الأصلية
     try:
         mean_ = np.mean(signal)
         std_ = np.std(signal)
@@ -113,13 +133,125 @@ def extract_features(signal):
         max_slope = min_slope = mean_slope = slope_early = slope_late = 0.0
         zero_crossings = 0
 
-    # الميزات النهائية
-    return [
-        mean_, std_, min_, max_, skew_, kurt, rms, entropy_val,         # ← 8 ميزات إحصائية
-        total_power, dom_freq,                                          # ← 2 ميزات ترددية
-        wavelet_energy,                                                 # ← 1 ميزة تحويل موجي
-        max_slope, min_slope, mean_slope, zero_crossings, slope_early, slope_late  # ← 6 ميزات انحدار
+    # -------- ميزات إضافية مخصّصة كما طلبت --------
+
+    def get_idx(name):
+        if peak_indices and name in peak_indices:
+            idx = peak_indices.get(name)
+            if isinstance(idx, (int, np.integer)) and 0 <= idx < len(signal):
+                return int(idx)
+        return None
+
+    Q_idx = get_idx('Q')
+    R_idx = get_idx('R')
+    S_idx = get_idx('S')
+
+    qrs_angle = 0.0
+    if Q_idx is not None and R_idx is not None and S_idx is not None:
+        dx = 1.0 / SAMPLING_RATE
+        if Q_idx < R_idx < S_idx:
+            slope_before = (signal[R_idx] - signal[Q_idx]) / ((R_idx - Q_idx) * dx) if (R_idx - Q_idx) else 0.0
+            slope_after = (signal[S_idx] - signal[R_idx]) / ((S_idx - R_idx) * dx) if (S_idx - R_idx) else 0.0
+            qrs_angle = np.arctan(slope_after) - np.arctan(slope_before)
+
+    def duration_to_peak(wave_idx):
+        if wave_idx is None or not (3 < wave_idx < len(signal)-3):
+            return 0.0, 0.0
+        local = signal[max(0, wave_idx-7):min(len(signal), wave_idx+7)]
+        peak = np.argmax(local)
+        rise = abs(peak - (wave_idx-7)) * dx
+        fall = abs((wave_idx+7) - peak) * dx
+        return rise, fall
+
+    P_idx = get_idx('P')
+    T_idx = get_idx('T')
+    P_rise, P_fall = duration_to_peak(P_idx)
+    T_rise, T_fall = duration_to_peak(T_idx)
+
+    inflec_count = 0
+    if S_idx is not None and T_idx is not None and S_idx < T_idx:
+        d2 = np.diff(np.sign(np.diff(signal[S_idx:T_idx+1])))
+        inflec_count = np.sum(d2 != 0)
+
+    polarity = 0
+    if np.max(signal) > abs(np.min(signal)):
+        polarity = 1 if np.min(signal) >= 0 else 2 if np.min(signal) < 0 and np.max(signal) > 0 else -1
+    else:
+        polarity = -1 if np.max(signal) <= 0 else 2 if np.max(signal) > 0 and np.min(signal) < 0 else 1
+
+    qrs_triangle_area = 0.0
+    if Q_idx is not None and S_idx is not None and Q_idx < S_idx:
+        height = np.max(signal[Q_idx:S_idx+1]) - np.min(signal[Q_idx:S_idx+1])
+        width = (S_idx - Q_idx) * dx
+        qrs_triangle_area = 0.5 * width * height
+
+    qrs_peak = np.max(signal[Q_idx:S_idx+1]) if Q_idx is not None and S_idx is not None and Q_idx < S_idx else 0.0
+    qrs_width = (S_idx - Q_idx) * dx if Q_idx is not None and S_idx is not None and Q_idx < S_idx else 1e-6
+    peak_to_width = qrs_peak / qrs_width if qrs_width > 1e-6 else 0.0
+
+    n = len(signal)
+    frac = max(1, int(n * 0.1))
+    base_start = np.mean(signal[:frac]) if frac < n else 0.0
+    base_end = np.mean(signal[-frac:]) if frac < n else 0.0
+    baseline_drift = base_end - base_start
+
+    try:
+        accel = np.diff(signal, n=2) / (dx ** 2)
+        max_accel = float(np.max(np.abs(accel)))
+    except:
+        max_accel = 0.0
+
+    mean_curvature = np.mean(np.abs(np.diff(signal, n=2))) if len(signal) > 2 else 0.0
+    rmssd = np.sqrt(np.mean(np.diff(signal) ** 2))
+
+    features = [
+        mean_, std_, min_, max_, skew_, kurt, rms, entropy_val,
+        total_power, dom_freq, wavelet_energy,
+        max_slope, min_slope, mean_slope, zero_crossings, slope_early, slope_late
     ]
+    features += [
+        qrs_angle, P_rise, P_fall, T_rise, T_fall, inflec_count, polarity,
+        qrs_triangle_area, peak_to_width, baseline_drift,
+        max_accel, mean_curvature, rmssd
+    ]
+
+    # -------------- تضمين الميتاداتا الرقمية تلقائياً ----------------------
+    # ادخل meta_keys (قائمة) و metadata (dict) كوسائط اختيارية:
+    if (metadata is not None) and (meta_keys is not None):
+        meta_vector = []
+        for k in meta_keys:
+            val = metadata.get(k, 0.0)
+            if isinstance(val, str):  # ترميز النصوص (تصنيفية) كرقم (مثلا OneHot أو LabelEncoded)
+                try:
+                    val = float(val)
+                except:
+                    val = 0.0
+            meta_vector.append(val)
+        features += meta_vector  # ألحق الميتاداتا الموسعة في الميزات
+    # ----------------------------------------------------------------------
+
+    return features
+
+
+
+
+def analyze_wave_morphology(wave, threshold_flat=0.05):
+    if wave is None or len(wave) < 3 or np.any(~np.isfinite(wave)):
+        return "unknown"
+    peaks, _ = find_peaks(wave)
+    troughs, _ = find_peaks(-wave)
+    n_extrema = len(peaks) + len(troughs)
+
+    if np.ptp(wave) < threshold_flat:
+        return "flat"
+    elif np.max(wave) < 0:
+        return "inverted"
+    elif n_extrema >= 2:
+        return "biphasic"
+    elif np.max(np.abs(np.gradient(wave))) > 1.5 * np.std(wave):
+        return "spike"
+    else:
+        return "normal"
 
 
 def extract_intervals(delineate_raw):
@@ -258,7 +390,8 @@ def process_record(args):
         for lead_idx, lead_name in enumerate(LEAD_NAMES):
             signal = ecg[:, lead_idx]
             try:
-                feats = extract_features(signal)
+                # تمرير مواقع القمم لنفس الليد كقاموس
+                feats = extract_features(signal, peak_indices=segment_peaks[lead_name])
                 feature_record['features'][lead_name] = feats
             except: return [], [], []
             feature_record['intervals'][lead_name] = extract_intervals(delineate_all[lead_idx])
@@ -272,6 +405,22 @@ def process_record(args):
                     wave_info[f"{wave}_amp"] = None
                     wave_info[f"{wave}_time"] = None
 
+                # 🔹 حساب morphology للموجات ← خارج if/else
+                window = 20
+                if rel_peak is not None and window < SEGMENT_LENGTH - window:
+                    start = int(rel_peak) - window // 2
+                    end = int(rel_peak) + window // 2
+                    if 0 <= start < end <= SEGMENT_LENGTH:
+                        waveform = segment[start:end, lead_idx]
+                        morph = analyze_wave_morphology(waveform)
+                        wave_info[f"{wave}_morph"] = morph
+                    else:
+                        wave_info[f"{wave}_morph"] = "unknown"
+                else:
+                    wave_info[f"{wave}_morph"] = "unknown"
+
+
+
             # QRS Area and Duration ← هذا خارج الفور، لكن داخل نفس البلوك
             q_idx = segment_peaks[lead_name].get('Q')
             s_idx = segment_peaks[lead_name].get('S')
@@ -280,6 +429,8 @@ def process_record(args):
 
             feature_record['waves'][lead_name] = wave_info
         feature_record['segment'] = segment  # Add this line
+        if has_outlier_peaks(segment_peaks, segment):
+            continue
         segments_out.append(segment)
         pqrst_out.append(feature_record)
         segment_keys.append({'record_id': record_id, 'R_indices': r_indices})
