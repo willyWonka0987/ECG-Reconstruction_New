@@ -34,12 +34,6 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # --- Dataset Class ---
 class RichECGDataset(Dataset):
-    IMPORTANT_FEATURES = [
-        217, 216, 293, 295, 136, 294, 214, 215, 135, 132,
-        137, 296, 213, 134, 133, 292, 218, 212, 138, 211,
-        219, 131, 297, 290, 224, 220, 139, 210, 140, 130
-    ]  # قائمة الميزات المهمة حسب XGBoost
-
     def __init__(self, features_path, segments_path, target_lead):
         self.samples = []
         segments = np.load(segments_path)[:, :SEGMENT_LENGTH, :]
@@ -55,47 +49,34 @@ class RichECGDataset(Dataset):
                     if seg_idx >= segments.shape[0]:
                         continue
 
-                    # --- المقطع الكامل من كل ليد ---
                     full_segment_inputs = []
                     for lead in INPUT_LEADS:
-                        lead_index = [
-                            "I", "II", "III", "aVR", "aVL", "aVF",
-                            "V1", "V2", "V3", "V4", "V5", "V6"
-                        ].index(lead)
+                        lead_index = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"].index(lead)
                         full_segment_inputs.append(segments[seg_idx, :, lead_index])
                     full_segment_inputs = np.concatenate(full_segment_inputs)
 
-                    # --- استخراج الميزات المهمة فقط ---
-                    if not all(len(rec["features"][lead]) > max(self.IMPORTANT_FEATURES) for lead in INPUT_LEADS):
-                        continue
-                    advanced_features_inputs = np.concatenate([
-                        np.array(rec["features"][lead])[self.IMPORTANT_FEATURES]
-                        for lead in INPUT_LEADS
-                    ])
+                    # الميزات المطوّرة: يفترض أن rec["features"][lead] هي القائمة الموسّعة مع كل الميزات الجديدة
+                    advanced_features_inputs = np.concatenate([rec["features"][lead] for lead in INPUT_LEADS])
 
-
-
-                    # --- الميتاداتا ---
+                    # ---  تضمين الميتاداتا ---
                     metadata = rec.get("metadata", {})
                     if isinstance(metadata, dict):
                         meta_values = np.array(list(metadata.values()), dtype=np.float32)
                     else:
-                        meta_values = np.zeros(1, dtype=np.float32)
+                        meta_values = np.zeros(1, dtype=np.float32)  # fallback في حال كانت metadata غير متاحة
 
-                    # --- دمج كل المكونات ---
+
+                    # ---  جمع كل الميزات ---
                     x = np.concatenate([advanced_features_inputs, full_segment_inputs, meta_values])
+                    # --------------------------
 
-                    lead_index = [
-                        "I", "II", "III", "aVR", "aVL", "aVF",
-                        "V1", "V2", "V3", "V4", "V5", "V6"
-                    ].index(target_lead)
+                    lead_index = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"].index(target_lead)
                     y = segments[seg_idx, :, lead_index]
 
                     if np.all(np.isfinite(x)) and np.all(np.isfinite(y)):
                         self.samples.append((x, y))
                 except EOFError:
                     break
-
         print(f"{features_path.name} ({target_lead}) - num of samples : {len(self.samples)}")
 
     def __len__(self):
