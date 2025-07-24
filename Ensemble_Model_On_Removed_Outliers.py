@@ -105,7 +105,7 @@ class MLP(nn.Module):
 # --- Training Loop ---
 with open(REPORT_FILE, "w") as report:
     for lead in TARGET_LEADS:
-        print(f"\n🔧 Training Stacking model for lead: {lead}...")
+        print(f"\nTraining Stacking model for lead: {lead}...")
         train_ds = RichECGDataset(SAVE_DIR / "features_train.pkl", SAVE_DIR / "segments_train.npy", lead)
         val_ds = RichECGDataset(SAVE_DIR / "features_val.pkl", SAVE_DIR / "segments_val.npy", lead)
         test_ds = RichECGDataset(SAVE_DIR / "features_test.pkl", SAVE_DIR / "segments_test.npy", lead)
