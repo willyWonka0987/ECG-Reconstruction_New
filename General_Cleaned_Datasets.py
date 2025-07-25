@@ -60,10 +60,6 @@ def get_superclass_and_names(labels_set):
 
 from scipy.signal import butter, filtfilt, iirnotch, medfilt
 
-# إضافة فلتر Notch لإزالة ضجيج 50/60Hz بدقة عالية
-def notch_filter(data, fs=100.0, notch_freq=50.0, quality_factor=30.0):
-    b, a = iirnotch(notch_freq, quality_factor, fs)
-    return filtfilt(b, a, data, axis=0)
 
 # إزالة خط الأساس بفلتر median
 def baseline_wander_removal(data, fs=100.0, window_sec=0.2):
@@ -73,30 +69,6 @@ def baseline_wander_removal(data, fs=100.0, window_sec=0.2):
     baseline = medfilt(data, kernel_size=(window_size, 1))
     return data - baseline
 
-# تشذيب الأطراف لتقليل آثار الفلترة عند البداية والنهاية
-def trim_edges(data, trim_samples=20):
-    if data.shape[0] <= 2 * trim_samples:
-        return data
-    return data[trim_samples:-trim_samples, :]
-
-# دالة تنظيف الإشارة المعدّلة: تجمع بين الفلاتر الأصلية وهذه الإضافات
-def clean_ecg_signal(arr, fs=100.0, use_notch=True, notch_freq=50.0, do_trim=True, trim_samples=20, use_median_baseline=True):
-    # الخطوة 1: فلترة تمرير النطاق (كما في كودك الأصلي)
-    arr = butter_bandpass_filter(arr, fs=fs)
-    # الخطوة 2: فلتر Notch اختياري
-    if use_notch:
-        arr = notch_filter(arr, fs=fs, notch_freq=notch_freq)
-    # الخطوة 3: إزالة خط الأساس بفلتر median اختياري
-    if use_median_baseline:
-        arr = baseline_wander_removal(arr, fs=fs)
-    # الخطوة 4: إزالة الضجيج بالتحويل المويجي (كما في كودك الأصلي)
-    arr = apply_dwt_denoising(arr)
-    # الخطوة 5: تشذيب الأطراف بعد كل الفلاتر (اختياري)
-    if do_trim:
-        arr = trim_edges(arr, trim_samples=trim_samples)
-    return arr
-
-
 # --- FILTERING BASED ON PAPER ---
 
 def butter_bandpass_filter(data, lowcut=1.0, highcut=45.0, fs=100.0, order=4):
@@ -105,17 +77,6 @@ def butter_bandpass_filter(data, lowcut=1.0, highcut=45.0, fs=100.0, order=4):
     high = highcut / nyq
     b, a = butter(order, [low, high], btype='band')
     return filtfilt(b, a, data, axis=0)
-
-def apply_dwt_denoising(data, wavelet='db5', level=8):
-    denoised = []
-    for i in range(data.shape[1]):
-        coeffs = pywt.wavedec(data[:, i], wavelet, level=level)
-        sigma = np.median(np.abs(coeffs[-level])) / 0.6745
-        uthresh = sigma * np.sqrt(2 * np.log(len(data)))
-        coeffs[1:] = [pywt.threshold(c, value=uthresh, mode='soft') for c in coeffs[1:]]
-        rec = pywt.waverec(coeffs, wavelet)
-        denoised.append(rec[:data.shape[0]])
-    return np.stack(denoised, axis=1)
 
 # --- LOAD AND CLEAN METADATA ---
 
@@ -176,6 +137,7 @@ meta_train = df_meta.loc[df_train.index].reset_index(drop=True)
 meta_val = df_meta.loc[df_val.index].reset_index(drop=True)
 meta_test = df_meta.loc[df_test.index].reset_index(drop=True)
 
+
 # --- ECG FUNCTIONS ---
 
 def get_record_path(filename_lr):
@@ -185,17 +147,11 @@ def get_record_path(filename_lr):
 def clean_ecg_signal(arr, fs=100.0, use_notch=True, notch_freq=50.0, do_trim=True, trim_samples=20, use_median_baseline=True):
     # 1. فلترة تمرير النطاق
     arr = butter_bandpass_filter(arr, fs=fs)
-    # 2. فلتر Notch لإزالة ضجيج 50/60Hz
-    if use_notch:
-        arr = notch_filter(arr, fs=fs, notch_freq=notch_freq)
+ 
     # 3. إزالة خط الأساس بواسطة median filter
     if use_median_baseline:
         arr = baseline_wander_removal(arr, fs=fs)
-    # 4. إزالة الضجيج عبر التحويل المويجي
-    arr = apply_dwt_denoising(arr)
-    # 5. تشذيب الأطراف لتخفيف تأثير الحواف
-    if do_trim:
-        arr = trim_edges(arr, trim_samples=trim_samples)
+
     return arr
 
 
@@ -267,7 +223,8 @@ def save_numpy_dataset(df_split, meta_split, Y_split, name):
     Y_split = Y_split[valid_indices]
 
     X_signals = np.array(ecg_data)
-    np.savez_compressed(DATASETS_DIR / f'{name}_signals.npz', X=X_signals)
+    record_ids = df_split.loc[df_split.index[valid_indices], 'ecg_id'].values
+    np.savez_compressed(DATASETS_DIR / f'{name}_signals.npz', X=X_signals, record_ids=record_ids)
     meta_split.to_csv(DATASETS_DIR / f'{name}_metadata.csv', index=False)
     pd.DataFrame(Y_split, columns=label_cols).to_csv(DATASETS_DIR / f'{name}_labels.csv', index=False)
 

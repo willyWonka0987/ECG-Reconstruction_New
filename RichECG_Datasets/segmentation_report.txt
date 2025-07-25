@@ -73,3 +73,18 @@ Total aligned segments saved: 6425
 Loaded test: 1829 records
 Total aligned segments saved: 6656
 
+
+--- Processing train set ---
+Loaded train: 10237 records
+Total aligned segments saved: 41188
+
+
+--- Processing val set ---
+Loaded val: 1799 records
+Total aligned segments saved: 6903
+
+
+--- Processing test set ---
+Loaded test: 1829 records
+Total aligned segments saved: 7158
+
