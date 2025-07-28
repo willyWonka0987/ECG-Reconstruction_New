@@ -68,7 +68,7 @@ class RichECGDataset(Dataset):
 
 
                     # ---  جمع كل الميزات ---
-                    x = full_segment_inputs
+                    x = x = np.concatenate([full_segment_inputs, meta_values])
                     # --------------------------
 
                     lead_index = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"].index(target_lead)
