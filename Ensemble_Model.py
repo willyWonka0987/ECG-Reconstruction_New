@@ -8,6 +8,7 @@ from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_squared_error, r2_score
 from scipy.stats import pearsonr
 from xgboost import XGBRegressor
+from skimage.metrics import structural_similarity as ssim
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import os
@@ -26,7 +27,7 @@ RMSE_PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 INPUT_LEADS = ["I", "V2", "V6"]
 TARGET_LEADS = ["II", "V1", "V3", "V4", "V5"]
-SEGMENT_LENGTH = 80
+SEGMENT_LENGTH = 128
 BATCH_SIZE = 32
 EPOCHS = 300
 LEARNING_RATE = 1e-3
@@ -67,7 +68,7 @@ class RichECGDataset(Dataset):
 
 
                     # ---  جمع كل الميزات ---
-                    x = np.concatenate([advanced_features_inputs, full_segment_inputs, meta_values])
+                    x = full_segment_inputs
                     # --------------------------
 
                     lead_index = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"].index(target_lead)
@@ -116,6 +117,13 @@ class MLP(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
+def compute_ssim_batch(y_true, y_pred):
+    scores = []
+    for i in range(y_true.shape[0]):
+        score = ssim(y_true[i], y_pred[i], data_range=y_true[i].max() - y_true[i].min())
+        scores.append(score)
+    return np.mean(scores)
 
 # --- Training Loop ---
 with open(REPORT_FILE, "w") as report:
@@ -218,6 +226,12 @@ with open(REPORT_FILE, "w") as report:
             for i in range(SEGMENT_LENGTH)
             if np.std(meta_y_test[:, i]) > 0
         ])
+        ssim_score = compute_ssim_batch(meta_y_test, meta_pred)
+        print(f"\nLead {lead} Evaluation Summary:")
+        print(f"  RMSE             = {rmse:.4f}")
+        print(f"  R^2              = {r2:.4f}")
+        print(f"  Pearson Corr     = {pearson_corr:.4f}")
+        print(f"  SSIM             = {ssim_score:.4f}")
 
         # RMSE per point
         rmse_per_point = np.sqrt(np.mean((meta_y_test - meta_pred) ** 2, axis=0)).tolist()
@@ -225,6 +239,7 @@ with open(REPORT_FILE, "w") as report:
         report.write(f"RMSE: {rmse:.4f}\n")
         report.write(f"R^2: {r2:.4f}\n")
         report.write(f"Pearson Correlation: {pearson_corr:.4f}\n")
+        report.write(f"SSIM: {ssim_score:.4f}\n")
         report.write(f"RMSE per point (length {SEGMENT_LENGTH}):\n")
         report.write(", ".join(f"{v:.6f}" for v in rmse_per_point) + "\n")
 

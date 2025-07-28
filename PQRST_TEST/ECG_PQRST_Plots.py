@@ -44,6 +44,10 @@ def baseline_wander_removal(data, fs=100.0, window_sec=0.2):
     baseline = medfilt(data, kernel_size=(window_size, 1))
     return data - baseline
 
+def smooth_signal(signal, window_size=3):
+    kernel = np.ones(window_size) / window_size
+    return np.convolve(signal, kernel, mode='same')
+
 # نوافذ القمم
 P_win = (-30, -10)
 Q_win = (-7, -2)
@@ -60,6 +64,7 @@ for idx in range(min(20, len(df))):
     try:
         filtered = butter_bandpass_filter(raw_signals, fs=sampling_rate)
         filtered = baseline_wander_removal(filtered, fs=sampling_rate)
+        filtered = np.apply_along_axis(smooth_signal, axis=0, arr=filtered)
     except Exception as e:
         print(f"⚠️ فشل الفلترة في ECG {idx}: {e}")
         continue

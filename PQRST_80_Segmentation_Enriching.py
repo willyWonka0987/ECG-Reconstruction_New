@@ -26,7 +26,7 @@ SAVE_DIR.mkdir(parents=True, exist_ok=True)
 STATS_DIR.mkdir(parents=True, exist_ok=True)
 REPORT_PATH = SAVE_DIR / "segmentation_report.txt"
 SAMPLING_RATE = 100
-SEGMENT_LENGTH = 80
+SEGMENT_LENGTH = 128
 HALF_WINDOW = SEGMENT_LENGTH // 2
 R_WINDOW = 50
 LEAD_NAMES = ['I', 'II', 'III', 'aVR', 'aVL', 'aVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6']
@@ -35,16 +35,48 @@ PEAK_COLORS = {"P": "blue", "Q": "orange", "R": "red", "S": "green", "T": "purpl
 
 report_lines = []
 
-# ⬇️ This helper function checks for outlier amplitudes
+# --- New Directory for Outlier Plots ---
+OUTLIER_PLOTS_DIR = SAVE_DIR / "outlier_peaks_plots"
+OUTLIER_PLOTS_DIR.mkdir(exist_ok=True)
 
-def has_outlier_peaks(peaks_dict, segment, threshold=4.0):
+# --- Counter dict to limit images to 10 per (lead, wave) ---
+outlier_plots_counter = {lead: {wave: 0 for wave in ['P', 'Q', 'R', 'S', 'T']} for lead in LEAD_NAMES}
+
+def save_peak_outlier_plot(segment, lead, lead_idx, peaks_dict, outlier_wave, record_id=None, seg_idx=None):
+    global outlier_plots_counter
+    # Only save max 10 shots per (lead, wave)
+    if outlier_plots_counter[lead][outlier_wave] >= 10:
+        return
+    sig = segment[:, lead_idx]
+    fig, ax = plt.subplots(figsize=(7, 3))
+    ax.plot(sig, color='black', lw=1)
+    for w, c in PEAK_COLORS.items():
+        peak = peaks_dict.get(lead, {}).get(w)
+        if peak is not None and isinstance(peak, (int, np.integer)) and 0 <= peak < len(sig):
+            ax.scatter(int(peak), sig[int(peak)], color=c, s=30, label=w)
+    t = f"LID: {lead} | Peak: {outlier_wave} |"
+    t += f" rec:{record_id} seg:{seg_idx}" if record_id is not None and seg_idx is not None else ""
+    ax.set_title(t)
+    ax.set_xlabel('Sample')
+    ax.set_ylabel('Amplitude')
+    ax.legend()
+    plt.tight_layout()
+    fname = OUTLIER_PLOTS_DIR / f"{lead}_{outlier_wave}_outlier_{outlier_plots_counter[lead][outlier_wave]}.png"
+    plt.savefig(fname)
+    plt.close()
+    outlier_plots_counter[lead][outlier_wave] += 1
+
+# This helper function checks for outlier amplitudes and saves outlier plots
+def has_outlier_peaks(peaks_dict, segment, record_id=None, seg_idx=None, threshold=4.0):
     all_peaks = []
+    lead_peak_ref = []
     for lead_idx, lead in enumerate(LEAD_NAMES):
         for wave in ['P', 'Q', 'R', 'S', 'T']:
             peak_idx = peaks_dict[lead][wave]
             if peak_idx is not None and 0 <= peak_idx < SEGMENT_LENGTH:
                 amp = segment[int(peak_idx), lead_idx]
                 all_peaks.append(amp)
+                lead_peak_ref.append((lead, lead_idx, wave, peak_idx, amp))
     if len(all_peaks) < 2:
         return True  # not enough peaks to compute stats
     all_peaks = np.array(all_peaks)
@@ -53,8 +85,12 @@ def has_outlier_peaks(peaks_dict, segment, threshold=4.0):
     if std == 0:
         return True  # degenerate case
     z_scores = np.abs((all_peaks - mean) / std)
+    # --- NEW: Identify per-peak which are outliers (>3 z) and save images for each unique (lead, wave) ---
+    for i, zs in enumerate(z_scores):
+        if zs > threshold:
+            lead, lead_idx, wave, peak_idx, amp = lead_peak_ref[i]
+            save_peak_outlier_plot(segment, lead, lead_idx, peaks_dict, wave, record_id=record_id, seg_idx=seg_idx)
     return np.any(z_scores > threshold)
-
 
 def plot_segment(segment, segment_peaks, record_id, segment_idx):
     plt.figure(figsize=(12, 10))
@@ -74,6 +110,7 @@ def plot_segment(segment, segment_peaks, record_id, segment_idx):
     img_path = SAVE_DIR / f"{record_id}_segment_{segment_idx}.png"
     plt.savefig(img_path)
     plt.close()
+
 
 def extract_features(signal, peak_indices=None, metadata=None, meta_keys=None):
     signal = np.asarray(signal).astype(np.float32)
@@ -390,7 +427,6 @@ def process_record(args):
         for lead_idx, lead_name in enumerate(LEAD_NAMES):
             signal = ecg[:, lead_idx]
             try:
-                # تمرير مواقع القمم لنفس الليد كقاموس
                 feats = extract_features(signal, peak_indices=segment_peaks[lead_name])
                 feature_record['features'][lead_name] = feats
             except: return [], [], []
@@ -404,8 +440,6 @@ def process_record(args):
                 else:
                     wave_info[f"{wave}_amp"] = None
                     wave_info[f"{wave}_time"] = None
-
-                # 🔹 حساب morphology للموجات ← خارج if/else
                 window = 20
                 if rel_peak is not None and window < SEGMENT_LENGTH - window:
                     start = int(rel_peak) - window // 2
@@ -418,18 +452,14 @@ def process_record(args):
                         wave_info[f"{wave}_morph"] = "unknown"
                 else:
                     wave_info[f"{wave}_morph"] = "unknown"
-
-
-
-            # QRS Area and Duration ← هذا خارج الفور، لكن داخل نفس البلوك
             q_idx = segment_peaks[lead_name].get('Q')
             s_idx = segment_peaks[lead_name].get('S')
             wave_info['QRS_area'] = compute_area(segment[:, lead_idx], q_idx, s_idx)
             wave_info['QRS_duration'] = compute_duration(q_idx, s_idx)
-
             feature_record['waves'][lead_name] = wave_info
-        feature_record['segment'] = segment  # Add this line
-        if has_outlier_peaks(segment_peaks, segment):
+        feature_record['segment'] = segment
+        # -- call has_outlier_peaks with outlier plots enabled:
+        if has_outlier_peaks(segment_peaks, segment, record_id=record_id, seg_idx=len(pqrst_out)):
             continue
         segments_out.append(segment)
         pqrst_out.append(feature_record)
@@ -437,6 +467,7 @@ def process_record(args):
         if idx == 0:
             plot_segment(segment, segment_peaks, record_id, len(pqrst_out))
     return segments_out, pqrst_out, segment_keys
+
 
 def process_all(set_name, max_records):
     report_lines.append(f"\n--- Processing {set_name} set ---")

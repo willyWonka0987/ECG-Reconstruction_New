@@ -81,11 +81,11 @@ def butter_bandpass_filter(data, lowcut=1.0, highcut=45.0, fs=100.0, order=4):
 # --- LOAD AND CLEAN METADATA ---
 
 df = pd.read_csv(DATABASE_CSV)
-print("📊 Original data shape:", df.shape)
+print("Original data shape:", df.shape)
 
 df = df[df['validated_by_human'] == True]
 df = df[df['filename_lr'].notnull()]
-print("✅ After filename filtering:", df.shape)
+print("After filename filtering:", df.shape)
 
 for col in ['electrodes_problems', 'pacemaker', 'burst_noise', 'static_noise']:
     df[col] = df[col].fillna(0)
@@ -96,7 +96,7 @@ df = df[
     (df['burst_noise'] == 0) &
     (df['static_noise'] == 0)
 ]
-print("✅ After artifact filtering:", df.shape)
+print("After artifact filtering:", df.shape)
 
 df['heart_axis'] = df['heart_axis'].fillna('NOT')
 df['sex'] = df['sex'].fillna('unknown')
@@ -112,7 +112,7 @@ def extract_labels_all(scp_codes_str):
 
 df['labels'] = df['scp_codes'].apply(extract_labels_all)
 df = df[df['labels'].map(len) > 0].reset_index(drop=True)
-print("✅ After label extraction:", df.shape)
+print("After label extraction:", df.shape)
 
 encoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
 onehot_cols = encoder.fit_transform(df[['sex', 'heart_axis']])
@@ -215,7 +215,7 @@ def save_numpy_dataset(df_split, meta_split, Y_split, name):
             ecg = load_ecg(path)
             ecg_data.append(ecg)
         except Exception as e:
-            print(f"⚠️ Error reading {fname}: {e}")
+            print(f"Error reading {fname}: {e}")
             ecg_data.append(None)
     valid_indices = [i for i, ecg in enumerate(ecg_data) if ecg is not None]
     ecg_data = [ecg_data[i] for i in valid_indices]
@@ -264,7 +264,7 @@ def run_plots():
     plot_pie_distribution(df, 'sex', STATS_PLOTS_DIR / 'sex_distribution.png')
     plot_pie_distribution(df, 'heart_axis', STATS_PLOTS_DIR / 'heart_axis_distribution.png')
 
-    print("✅ PTB-XL data preparation complete with full 12-lead signal dataset")
+    print("PTB-XL data preparation complete with full 12-lead signal dataset")
 
 # Uncomment to run
 run_plots()

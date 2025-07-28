@@ -48,12 +48,12 @@ def plot_wave_stats(wave):
         # Position
         pos = np.array(pos_data[wave][lead])
         if len(pos) == 0:
-            print(f"❌ No position data for {wave}, lead {lead}")
+            print(f"No position data for {wave}, lead {lead}")
             continue
         mean = np.mean(pos)
         median = np.median(pos)
         std = np.std(pos)
-        outliers = np.sum((pos < mean - 5 * std) | (pos > mean + 5 * std))
+        outliers = np.sum((pos < mean - 3 * std) | (pos > mean + 3 * std))
 
         ax_pos = axs[row, 0]
         ax_pos.hist(pos, bins=40, color='skyblue', edgecolor='black')
@@ -63,7 +63,7 @@ def plot_wave_stats(wave):
         ax_pos.axvline(mean + std, color='orange', linestyle='--')
         ax_pos.axvline(mean - 3 * std, color='purple', linestyle=':', label=f"±3σ: {3 * std:.3f}")
         ax_pos.axvline(mean + 3 * std, color='purple', linestyle=':')
-        ax_pos.set_title(f"Lead {lead} - {wave}-wave Position\nOutliers > 5σ: {outliers}")
+        ax_pos.set_title(f"Lead {lead} - {wave}-wave Position\nOutliers > 3σ: {outliers}")
         ax_pos.set_xlabel("Time (s)")
         ax_pos.set_ylabel("Frequency")
         ax_pos.legend()
@@ -71,12 +71,12 @@ def plot_wave_stats(wave):
         # Amplitude
         amp = np.array(amp_data[wave][lead])
         if len(amp) == 0:
-            print(f"❌ No amplitude data for {wave}, lead {lead}")
+            print(f"No amplitude data for {wave}, lead {lead}")
             continue
         mean = np.mean(amp)
         median = np.median(amp)
         std = np.std(amp)
-        outliers = np.sum((amp < mean - 5 * std) | (amp > mean + 5 * std))
+        outliers = np.sum((amp < mean - 3 * std) | (amp > mean + 3 * std))
 
         ax_amp = axs[row, 1]
         ax_amp.hist(amp, bins=40, color='skyblue', edgecolor='black')
@@ -87,12 +87,12 @@ def plot_wave_stats(wave):
         ax_amp.axvline(mean - 3 * std, color='purple', linestyle=':', label=f"±3σ: {3 * std:.3f}")
         ax_amp.axvline(mean + 3 * std, color='purple', linestyle=':')
 
-        # Highlight outliers > 5σ
-        outlier_indices = np.where((amp < mean - 5 * std) | (amp > mean + 5 * std))[0]
+        # Highlight outliers > 3σ
+        outlier_indices = np.where((amp < mean - 3 * std) | (amp > mean + 3 * std))[0]
         outlier_values = amp[outlier_indices]
         ax_amp.scatter(outlier_values, np.zeros_like(outlier_values), color='red', s=5)
 
-        ax_amp.set_title(f"Lead {lead} - {wave}-wave Amplitude\nOutliers > 5σ: {outliers}")
+        ax_amp.set_title(f"Lead {lead} - {wave}-wave Amplitude\nOutliers > 3σ: {outliers}")
         ax_amp.set_xlabel("Amplitude (mV)")
         ax_amp.set_ylabel("Frequency")
         ax_amp.legend()
@@ -105,4 +105,4 @@ def plot_wave_stats(wave):
 for wave in WAVES:
     plot_wave_stats(wave)
 
-print("✅ All wave statistics plotted and saved.")
+print("All wave statistics plotted and saved.")
