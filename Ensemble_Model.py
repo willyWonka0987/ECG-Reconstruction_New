@@ -15,7 +15,7 @@ import os
 
 # --- Config ---
 SAVE_DIR = Path("RichECG_Datasets")
-OUTPUT_DIR = Path("Stacked_Model_Results")
+OUTPUT_DIR = Path("Stacked_Model_Results2")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 PLOTS_DIR = OUTPUT_DIR / "plots"
 PLOTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -25,8 +25,8 @@ REPORT_FILE = OUTPUT_DIR / "evaluation_report.txt"
 RMSE_PLOTS_DIR = PLOTS_DIR / "rmse_per_point"
 RMSE_PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
-INPUT_LEADS = ["I", "V2", "V6"]
-TARGET_LEADS = ["II", "V1", "V3", "V4", "V5"]
+INPUT_LEADS = ["II", "V2", "V6", "V1", "V3", "V4", "V5"]
+TARGET_LEADS = ["I"]
 SEGMENT_LENGTH = 128
 BATCH_SIZE = 32
 EPOCHS = 300

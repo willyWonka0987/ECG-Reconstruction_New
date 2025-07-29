@@ -67,7 +67,7 @@ def save_peak_outlier_plot(segment, lead, lead_idx, peaks_dict, outlier_wave, re
     outlier_plots_counter[lead][outlier_wave] += 1
 
 # This helper function checks for outlier amplitudes and saves outlier plots
-def has_outlier_peaks(peaks_dict, segment, record_id=None, seg_idx=None, threshold=4.0):
+def has_outlier_peaks(peaks_dict, segment, record_id=None, seg_idx=None, threshold=5.0):
     all_peaks = []
     lead_peak_ref = []
     for lead_idx, lead in enumerate(LEAD_NAMES):
