@@ -25,8 +25,8 @@ REPORT_FILE = OUTPUT_DIR / "evaluation_report.txt"
 RMSE_PLOTS_DIR = PLOTS_DIR / "rmse_per_point"
 RMSE_PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
-INPUT_LEADS = ["II", "V2", "V6", "V1", "V3", "V4", "V5"]
-TARGET_LEADS = ["I"]
+INPUT_LEADS = ["I", "V2", "V6"]
+TARGET_LEADS = ["II", "V1", "V3", "V4", "V5"]
 SEGMENT_LENGTH = 128
 BATCH_SIZE = 32
 EPOCHS = 300
