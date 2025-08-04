@@ -15,7 +15,7 @@ import os
 
 # --- Config ---
 SAVE_DIR = Path("RichECG_Datasets")
-OUTPUT_DIR = Path("Stacked_Model_Results2")
+OUTPUT_DIR = Path("Stacked_Model_Results")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 PLOTS_DIR = OUTPUT_DIR / "plots"
 PLOTS_DIR.mkdir(parents=True, exist_ok=True)
