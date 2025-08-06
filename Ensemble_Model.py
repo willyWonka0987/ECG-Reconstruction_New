@@ -32,6 +32,15 @@ BATCH_SIZE = 32
 EPOCHS = 300
 LEARNING_RATE = 1e-3
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+LAMBDA_COSINE = 0.5 # وزن الكوساين في التابع
+
+# --- Cosine Similarity Function ---
+def cosine_similarity(y_pred, y_true):
+    # y_pred, y_true: [batch_size, seq_len]
+    y_pred_norm = y_pred / (y_pred.norm(dim=1, keepdim=True) + 1e-8)
+    y_true_norm = y_true / (y_true.norm(dim=1, keepdim=True) + 1e-8)
+    sim = (y_pred_norm * y_true_norm).sum(dim=1)
+    return sim.mean()
 
 # --- Dataset Class ---
 class RichECGDataset(Dataset):
@@ -56,24 +65,15 @@ class RichECGDataset(Dataset):
                         full_segment_inputs.append(segments[seg_idx, :, lead_index])
                     full_segment_inputs = np.concatenate(full_segment_inputs)
 
-                    # الميزات المطوّرة: يفترض أن rec["features"][lead] هي القائمة الموسّعة مع كل الميزات الجديدة
                     advanced_features_inputs = np.concatenate([rec["features"][lead] for lead in INPUT_LEADS])
-
-                    # ---  تضمين الميتاداتا ---
                     metadata = rec.get("metadata", {})
                     if isinstance(metadata, dict):
                         meta_values = np.array(list(metadata.values()), dtype=np.float32)
                     else:
-                        meta_values = np.zeros(1, dtype=np.float32)  # fallback في حال كانت metadata غير متاحة
-
-
-                    # ---  جمع كل الميزات ---
+                        meta_values = np.zeros(1, dtype=np.float32)
                     x = np.concatenate([advanced_features_inputs, full_segment_inputs, meta_values])
-                    # --------------------------
-
                     lead_index = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"].index(target_lead)
                     y = segments[seg_idx, :, lead_index]
-
                     if np.all(np.isfinite(x)) and np.all(np.isfinite(y)):
                         self.samples.append((x, y))
                 except EOFError:
@@ -87,8 +87,6 @@ class RichECGDataset(Dataset):
         x, y = self.samples[idx]
         return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
 
-
-
 # --- MLP Model ---
 class MLP(nn.Module):
     def __init__(self, input_dim, output_dim):
@@ -98,20 +96,16 @@ class MLP(nn.Module):
             nn.LayerNorm(512),
             nn.LeakyReLU(0.1),
             nn.Dropout(0.3),
-
             nn.Linear(512, 256),
             nn.LayerNorm(256),
             nn.LeakyReLU(0.1),
             nn.Dropout(0.3),
-
             nn.Linear(256, 128),
             nn.LayerNorm(128),
             nn.LeakyReLU(0.1),
             nn.Dropout(0.2),
-
             nn.Linear(128, 64),
             nn.LeakyReLU(0.1),
-
             nn.Linear(64, output_dim)
         )
 
@@ -132,7 +126,6 @@ with open(REPORT_FILE, "w") as report:
         train_ds = RichECGDataset(SAVE_DIR / "features_train.pkl", SAVE_DIR / "segments_train.npy", lead)
         val_ds = RichECGDataset(SAVE_DIR / "features_val.pkl", SAVE_DIR / "segments_val.npy", lead)
         test_ds = RichECGDataset(SAVE_DIR / "features_test.pkl", SAVE_DIR / "segments_test.npy", lead)
-
         train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
         val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
 
@@ -140,7 +133,7 @@ with open(REPORT_FILE, "w") as report:
         output_dim = SEGMENT_LENGTH
 
         mlp = MLP(input_dim, output_dim).to(DEVICE)
-        loss_fn = nn.MSELoss()
+        mse_loss_fn = nn.MSELoss()
         optimizer = torch.optim.Adam(mlp.parameters(), lr=LEARNING_RATE)
 
         best_val_loss = float("inf")
@@ -151,27 +144,39 @@ with open(REPORT_FILE, "w") as report:
         for epoch in range(EPOCHS):
             mlp.train()
             total_loss = 0.0
+            total_cosine = 0.0
             for xb, yb in tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} - Lead {lead}", leave=False):
                 xb, yb = xb.to(DEVICE), yb.to(DEVICE)
                 pred = mlp(xb)
-                loss = loss_fn(pred, yb)
+                mse_loss = mse_loss_fn(pred, yb)
+                cos_sim = cosine_similarity(pred, yb)
+                loss = mse_loss + LAMBDA_COSINE * (1 - cos_sim)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item() * xb.size(0)
+                total_cosine += cos_sim.item() * xb.size(0)
             avg_train_loss = total_loss / len(train_ds)
+            avg_train_cosine = total_cosine / len(train_ds)
 
             mlp.eval()
             val_loss = 0.0
+            val_cosine = 0.0
             with torch.no_grad():
                 for xb, yb in val_loader:
                     xb, yb = xb.to(DEVICE), yb.to(DEVICE)
                     pred = mlp(xb)
-                    loss = loss_fn(pred, yb)
+                    mse_loss = mse_loss_fn(pred, yb)
+                    cos_sim = cosine_similarity(pred, yb)
+                    loss = mse_loss + LAMBDA_COSINE * (1 - cos_sim)
                     val_loss += loss.item() * xb.size(0)
+                    val_cosine += cos_sim.item() * xb.size(0)
             avg_val_loss = val_loss / len(val_ds)
+            avg_val_cosine = val_cosine / len(val_ds)
 
-            print(f"Epoch {epoch+1} - Train Loss: {avg_train_loss:.4f} - Val Loss: {avg_val_loss:.4f}")
+            print(f"Epoch {epoch+1} - Train Loss: {avg_train_loss:.4f} - Val Loss: {avg_val_loss:.4f} "
+                  f"- Train CosSim: {avg_train_cosine:.4f} - Val CosSim: {avg_val_cosine:.4f}")
+
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 best_model_state = mlp.state_dict()
@@ -227,11 +232,17 @@ with open(REPORT_FILE, "w") as report:
             if np.std(meta_y_test[:, i]) > 0
         ])
         ssim_score = compute_ssim_batch(meta_y_test, meta_pred)
+        # Cosine similarity على بيانات الاختبار
+        cos_test = np.mean([
+            np.dot(meta_y_test[i], meta_pred[i]) / (np.linalg.norm(meta_y_test[i]) * np.linalg.norm(meta_pred[i]) + 1e-8)
+            for i in range(meta_y_test.shape[0])
+        ])
         print(f"\nLead {lead} Evaluation Summary:")
         print(f"  RMSE             = {rmse:.4f}")
         print(f"  R^2              = {r2:.4f}")
         print(f"  Pearson Corr     = {pearson_corr:.4f}")
         print(f"  SSIM             = {ssim_score:.4f}")
+        print(f"  Cosine Similarity= {cos_test:.4f}")
 
         # RMSE per point
         rmse_per_point = np.sqrt(np.mean((meta_y_test - meta_pred) ** 2, axis=0)).tolist()
@@ -240,6 +251,7 @@ with open(REPORT_FILE, "w") as report:
         report.write(f"R^2: {r2:.4f}\n")
         report.write(f"Pearson Correlation: {pearson_corr:.4f}\n")
         report.write(f"SSIM: {ssim_score:.4f}\n")
+        report.write(f"Cosine Similarity: {cos_test:.4f}\n")
         report.write(f"RMSE per point (length {SEGMENT_LENGTH}):\n")
         report.write(", ".join(f"{v:.6f}" for v in rmse_per_point) + "\n")
 

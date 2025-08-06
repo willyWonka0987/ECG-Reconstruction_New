@@ -13,6 +13,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import warnings
 from scipy.signal import find_peaks
+from tsfresh.feature_extraction import extract_features
+import pandas as pd
+
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 warnings.filterwarnings("ignore", category=UserWarning, module="neurokit2")
@@ -112,7 +115,7 @@ def plot_segment(segment, segment_peaks, record_id, segment_idx):
     plt.close()
 
 
-def extract_features(signal, peak_indices=None, metadata=None, meta_keys=None):
+def my_feature_extraction(signal, peak_indices=None, metadata=None, meta_keys=None):
     signal = np.asarray(signal).astype(np.float32)
     features = []
 
@@ -266,6 +269,64 @@ def extract_features(signal, peak_indices=None, metadata=None, meta_keys=None):
             meta_vector.append(val)
         features += meta_vector  # ألحق الميتاداتا الموسعة في الميزات
     # ----------------------------------------------------------------------
+
+           # --- tsfresh feature extraction ---
+    try:
+        from tsfresh.feature_extraction.settings import EfficientFCParameters
+        custom_fc_parameters = {
+            # --- شكل الإشارة والطاقة ---
+            "abs_energy": None,
+            "mean": None,
+            "standard_deviation": None,
+            "skewness": None,
+            "kurtosis": None,
+
+            # --- التكرارات والتذبذب ---
+            "number_peaks": [{"n": 5}],
+            "autocorrelation": [{"lag": 1}],
+            "cid_ce": [{"normalize": True}],
+            "fft_coefficient": [{"coeff": 0, "attr": "abs"}],
+            "percentage_of_reoccurring_datapoints_to_all_datapoints": None,
+
+            # --- خصائص الزمن والتغير ---
+            "longest_strike_above_mean": None,
+            "mean_change": None,
+            "mean_abs_change": None,
+            "first_location_of_maximum": None,
+            "first_location_of_minimum": None,
+
+            # --- بعض السمات الطيفية الهامة ---
+            "agg_autocorrelation": [{"f_agg": "mean", "maxlag": 10}],
+            "sample_entropy": None,
+            "maximum": None,
+            "minimum": None,
+        }
+
+
+        df = pd.DataFrame({
+            "id": [0]*len(signal),
+            "time": np.arange(len(signal)),
+            "value": signal
+        })
+
+        tsf_features = extract_features(
+            df,
+            column_id="id",
+            column_sort="time",
+            default_fc_parameters=custom_fc_parameters,
+            disable_progressbar=True,
+            n_jobs=0
+        )
+
+
+        tsf_values = tsf_features.iloc[0].values.astype(np.float32)
+        features += tsf_values.tolist()
+
+    except Exception as e:
+        print(f"⚠️ tsfresh extraction failed: {e}")
+        features += [0.0] * 10  # fallback padding if tsfresh fails
+
+
 
     return features
 
@@ -427,7 +488,7 @@ def process_record(args):
         for lead_idx, lead_name in enumerate(LEAD_NAMES):
             signal = ecg[:, lead_idx]
             try:
-                feats = extract_features(signal, peak_indices=segment_peaks[lead_name])
+                feats = my_feature_extraction(signal, peak_indices=segment_peaks[lead_name])
                 feature_record['features'][lead_name] = feats
             except: return [], [], []
             feature_record['intervals'][lead_name] = extract_intervals(delineate_all[lead_idx])
