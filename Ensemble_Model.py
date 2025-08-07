@@ -71,7 +71,7 @@ class RichECGDataset(Dataset):
                         meta_values = np.array(list(metadata.values()), dtype=np.float32)
                     else:
                         meta_values = np.zeros(1, dtype=np.float32)
-                    x = np.concatenate([advanced_features_inputs, full_segment_inputs, meta_values])
+                    x = np.concatenate([full_segment_inputs])
                     lead_index = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"].index(target_lead)
                     y = segments[seg_idx, :, lead_index]
                     if np.all(np.isfinite(x)) and np.all(np.isfinite(y)):
@@ -87,30 +87,27 @@ class RichECGDataset(Dataset):
         x, y = self.samples[idx]
         return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
 
-# --- MLP Model ---
-class MLP(nn.Module):
-    def __init__(self, input_dim, output_dim):
+# --- LSTM Model ---
+class LSTMNet(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers=1):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, 512),
-            nn.LayerNorm(512),
-            nn.LeakyReLU(0.1),
-            nn.Dropout(0.3),
-            nn.Linear(512, 256),
-            nn.LayerNorm(256),
-            nn.LeakyReLU(0.1),
-            nn.Dropout(0.3),
-            nn.Linear(256, 128),
-            nn.LayerNorm(128),
-            nn.LeakyReLU(0.1),
-            nn.Dropout(0.2),
-            nn.Linear(128, 64),
-            nn.LeakyReLU(0.1),
-            nn.Linear(64, output_dim)
-        )
+        self.input_dim = input_dim 
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.output_dim = output_dim
+
+        self.lstm = nn.LSTM(input_size=input_dim, hidden_size=hidden_dim,
+                            num_layers=num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, x):
-        return self.net(x)
+        # x shape: (batch_size, input_dim) --> we need to reshape to (batch_size, seq_len, feature_dim)
+        # هنا نعتبر أن لدينا سلسلة بطول واحد (seq_len = 1) ونضع كامل x كـ feature
+        x = x.unsqueeze(1)  # (batch_size, 1, input_dim)
+        output, (hn, cn) = self.lstm(x)  # hn shape: (num_layers, batch_size, hidden_dim)
+        hn = hn[-1]  # خذ الطبقة الأخيرة فقط
+        out = self.fc(hn)
+        return out
 
 def compute_ssim_batch(y_true, y_pred):
     scores = []
@@ -132,9 +129,9 @@ with open(REPORT_FILE, "w") as report:
         input_dim = len(train_ds[0][0])
         output_dim = SEGMENT_LENGTH
 
-        mlp = MLP(input_dim, output_dim).to(DEVICE)
+        model = LSTMNet(input_dim=input_dim, hidden_dim=256, output_dim=output_dim).to(DEVICE)
         mse_loss_fn = nn.MSELoss()
-        optimizer = torch.optim.Adam(mlp.parameters(), lr=LEARNING_RATE)
+        optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
         best_val_loss = float("inf")
         patience = 15
@@ -142,12 +139,12 @@ with open(REPORT_FILE, "w") as report:
         best_model_state = None
 
         for epoch in range(EPOCHS):
-            mlp.train()
+            model.train()
             total_loss = 0.0
             total_cosine = 0.0
             for xb, yb in tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} - Lead {lead}", leave=False):
                 xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-                pred = mlp(xb)
+                pred = model(xb)
                 mse_loss = mse_loss_fn(pred, yb)
                 cos_sim = cosine_similarity(pred, yb)
                 loss = mse_loss + LAMBDA_COSINE * (1 - cos_sim)
@@ -159,13 +156,13 @@ with open(REPORT_FILE, "w") as report:
             avg_train_loss = total_loss / len(train_ds)
             avg_train_cosine = total_cosine / len(train_ds)
 
-            mlp.eval()
+            model.eval()
             val_loss = 0.0
             val_cosine = 0.0
             with torch.no_grad():
                 for xb, yb in val_loader:
                     xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-                    pred = mlp(xb)
+                    pred = model(xb)
                     mse_loss = mse_loss_fn(pred, yb)
                     cos_sim = cosine_similarity(pred, yb)
                     loss = mse_loss + LAMBDA_COSINE * (1 - cos_sim)
@@ -179,7 +176,7 @@ with open(REPORT_FILE, "w") as report:
 
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
-                best_model_state = mlp.state_dict()
+                best_model_state = model.state_dict()
                 counter = 0
             else:
                 counter += 1
@@ -188,27 +185,27 @@ with open(REPORT_FILE, "w") as report:
                     break
 
         if best_model_state is not None:
-            mlp.load_state_dict(best_model_state)
+            model.load_state_dict(best_model_state)
 
-        torch.save(mlp.state_dict(), MODELS_DIR / f"mlp_model_{lead}.pt")
+        torch.save(model.state_dict(), MODELS_DIR / f"LSTM_model_{lead}.pt")
 
         def collect_predictions(dataset):
-            xs, ys, mlp_out = [], [], []
-            mlp.eval()
+            xs, ys, LSTM_out = [], [], []
+            model.eval()
             X_xgb, Y_xgb = [], []
             with torch.no_grad():
                 for xb, yb in DataLoader(dataset, batch_size=BATCH_SIZE):
                     xs.append(xb.numpy())
                     ys.append(yb.numpy())
                     xb_gpu = xb.to(DEVICE)
-                    mlp_preds = mlp(xb_gpu).cpu().numpy()
-                    mlp_out.append(mlp_preds)
+                    LSTM_preds = model(xb_gpu).cpu().numpy()
+                    LSTM_out.append(LSTM_preds)
                     X_xgb.extend(xb.numpy())
                     Y_xgb.extend(yb.numpy())
             xgb_model = XGBRegressor(n_estimators=100, max_depth=4, verbosity=0)
             xgb_model.fit(np.array(X_xgb), np.array(Y_xgb))
             xgb_preds = xgb_model.predict(np.array(X_xgb))
-            meta_X = np.hstack([np.vstack(mlp_out), xgb_preds])
+            meta_X = np.hstack([np.vstack(LSTM_out), xgb_preds])
             meta_y = np.vstack(ys)
             return meta_X, meta_y, xgb_model
 
@@ -274,9 +271,9 @@ with open(REPORT_FILE, "w") as report:
             ys.append(y.numpy())
         xs_tensor = torch.cat(xs).to(DEVICE)
         with torch.no_grad():
-            mlp_out = mlp(xs_tensor).cpu().numpy()
+            LSTM_out = model(xs_tensor).cpu().numpy()
             xgb_out = xgb_model.predict(xs_tensor.cpu().numpy())
-            meta_input = np.hstack([mlp_out, xgb_out])
+            meta_input = np.hstack([LSTM_out, xgb_out])
             preds = meta_model.predict(meta_input)
 
         for i in range(10):
